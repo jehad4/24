@@ -1,0 +1,26 @@
+[
+  {
+    "id": 1,
+    "name": "image_1.jpg",
+    "url": "https://images2.imgbox.com/5b/42/N66yyOl7_o.jpg",
+    "thumb": "https://images2.imgbox.com/5b/42/N66yyOl7_o.jpg"
+  },
+  {
+    "id": 2,
+    "name": "image_2.jpg",
+    "url": "https://images2.imgbox.com/f3/06/EhlC0SzD_o.jpg",
+    "thumb": "https://images2.imgbox.com/f3/06/EhlC0SzD_o.jpg"
+  },
+  {
+    "id": 3,
+    "name": "image_3.jpg",
+    "url": "https://images2.imgbox.com/1c/09/01JXv7JZ_o.jpg",
+    "thumb": "https://images2.imgbox.com/1c/09/01JXv7JZ_o.jpg"
+  },
+  {
+    "id": 4,
+    "name": "image_4.jpg",
+    "url": "https://images2.imgbox.com/7f/12/iJBus0mJ_o.jpg",
+    "thumb": "https://images2.imgbox.com/7f/12/iJBus0mJ_o.jpg"
+  }
+]
