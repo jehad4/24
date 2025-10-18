@@ -86,12 +86,12 @@ app.get('/api/album/:model/:index', async (req, res) => {
         const page = await context.newPage();
         // Navigate to search page
         console.log(`Navigating to: ${searchUrl}`);
-        const response = await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+        const response = await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 90000 });
         if (!response || response.status() === 404) {
           throw new Error(`Search page returned ${response ? response.status() : 'no response'}: ${searchUrl}`);
         }
         // Wait for content
-        await page.waitForSelector('body', { timeout: 30000 }).catch(() => console.log('Body selector timeout, proceeding...'));
+        await page.waitForSelector('body', { timeout: 45000 }).catch(() => console.log('Body selector timeout, proceeding...'));
         // Scroll to load gallery links
         await page.evaluate(async () => {
           await new Promise(resolve => {
@@ -151,13 +151,13 @@ app.get('/api/album/:model/:index', async (req, res) => {
         for (let pageNum = 1; pageNum <= maxPages; pageNum++) {
           const galleryLink = pageNum === 1 ? baseGalleryLink : `${baseGalleryLink}?page=${pageNum}`;
           console.log(`Navigating to gallery page ${pageNum}: ${galleryLink}`);
-          const galleryResponse = await page.goto(galleryLink, { waitUntil: 'domcontentloaded', timeout: 60000 });
+          const galleryResponse = await page.goto(galleryLink, { waitUntil: 'domcontentloaded', timeout: 90000 });
           if (!galleryResponse || galleryResponse.status() === 404) {
             console.log(`Page ${pageNum} not found or returned ${galleryResponse ? galleryResponse.status() : 'no response'}, stopping pagination`);
             break; // Stop if the page doesn't exist
           }
           // Wait for images
-          await page.waitForSelector('img, [style*="background-image"]', { timeout: 30000 }).catch(() => console.log(`Image selector timeout on page ${pageNum}, proceeding...`));
+          await page.waitForSelector('img, [style*="background-image"]', { timeout: 45000 }).catch(() => console.log(`Image selector timeout on page ${pageNum}, proceeding...`));
           // Scroll gallery page
           await page.evaluate(async () => {
             await new Promise(resolve => {
