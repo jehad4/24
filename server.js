@@ -147,7 +147,7 @@ app.get('/api/album/:model/:index', async (req, res) => {
 
         await delay(10000);
 
-        // Collect gallery links randomly by shuffling
+        // Collect gallery links and shuffle randomly
         galleryLinks = await page.evaluate(() => {
           const links = [];
           const selectors = [
@@ -172,7 +172,7 @@ app.get('/api/album/:model/:index', async (req, res) => {
             });
           });
 
-          // Shuffle links to make them random
+          // Shuffle links randomly
           for (let i = links.length - 1; i > 0; i--) {
             const j = Math.floor(Math.random() * (i + 1));
             [links[i], links[j]] = [links[j], links[i]];
@@ -200,7 +200,7 @@ app.get('/api/album/:model/:index', async (req, res) => {
           });
         }
 
-        // Navigate directly to the random gallery link at the specified index
+        // Navigate to the random gallery link at the specified index
         const galleryLink = galleryLinks[indexNum - 1];
         console.log(`Navigating to random gallery: ${galleryLink}`);
         try {
@@ -238,10 +238,9 @@ app.get('/api/album/:model/:index', async (req, res) => {
 
         await delay(10000);
 
-        // Collect image URLs and thumbnails from the gallery page
+        // Collect all image URLs and thumbnails from the gallery page
         imageData = await page.evaluate(() => {
           const items = [];
-          // Look for direct image links in <a> tags
           const anchors = document.querySelectorAll('a[href]');
           anchors.forEach(a => {
             const href = a.href;
@@ -271,7 +270,6 @@ app.get('/api/album/:model/:index', async (req, res) => {
             }
           });
 
-          // Also collect direct img tags as fallback
           const images = Array.from(document.querySelectorAll('img, [style*="background-image"]'));
           images.forEach(element => {
             let src;
@@ -300,71 +298,10 @@ app.get('/api/album/:model/:index', async (req, res) => {
             }
           });
 
-          return [...new Set(items.map(item => JSON.stringify(item)))].map(str => JSON.parse(str)).slice(0, 50);
+          return [...new Set(items.map(item => JSON.stringify(item)))].map(str => JSON.parse(str));
         });
 
         console.log(`Found ${imageData.length} images in ${galleryLink}`);
-
-        // Fallback to search page if no images in gallery
-        if (imageData.length === 0) {
-          console.log(`No images in gallery, falling back to search page...`);
-          await page.goto(searchUrl, { waitUntil: 'networkidle', timeout: 60000 });
-          await delay(12000);
-          await page.evaluate(async () => {
-            await new Promise((resolve) => {
-              let totalHeight = 0;
-              const distance = 200;
-              const maxScrolls = 100;
-              let scrollCount = 0;
-              const timer = setInterval(() => {
-                const scrollHeight = document.body.scrollHeight;
-                window.scrollBy(0, distance);
-                totalHeight += distance;
-                scrollCount++;
-                if (totalHeight >= scrollHeight || scrollCount >= maxScrolls) {
-                  clearInterval(timer);
-                  resolve();
-                }
-              }, 200);
-            });
-          });
-          await delay(10000);
-
-          imageData = await page.evaluate(() => {
-            const items = [];
-            const anchors = document.querySelectorAll('a[href]');
-            anchors.forEach(a => {
-              const href = a.href;
-              if (/\.(jpg|jpeg|png|gif|webp|bmp)$/i.test(href)) {
-                const img = a.querySelector('img');
-                let thumb = null;
-                if (img) {
-                  thumb = img.src ||
-                    img.getAttribute('data-src') ||
-                    img.getAttribute('data-lazy-src') ||
-                    img.getAttribute('data-original') ||
-                    (img.getAttribute('srcset')?.split(',')[0]?.split(' ')[0]);
-                } else {
-                  const style = a.getAttribute('style');
-                  const match = style?.match(/background-image:\s?url\(['"]?(.+?)['"]?\)/i);
-                  thumb = match ? match[1] : null;
-                }
-                const isRelevant = href.includes('ahottie.net') ||
-                  href.includes('imgbox.com') ||
-                  href.includes('wp-content');
-                if (isRelevant && href) {
-                  items.push({
-                    url: href,
-                    thumb: thumb || href
-                  });
-                }
-              }
-            });
-            return items.slice(0, 50);
-          });
-
-          console.log(`Found ${imageData.length} images from fallback search page`);
-        }
 
         await browser.close();
         browser = null;
@@ -541,7 +478,7 @@ app.get('/', (req, res) => {
     
     <p>Endpoints:</p>
     <ul>
-    <li><code>/api/album/hot/1</code> - Scrape images from random 1st gallery (shuffled) and save to cache</li>
+    <li><code>/api/album/hot/1</code> - Scrape images from random 1st gallery and save to cache</li>
     <li><code>/api/nsfw/hot/1</code> - Display images from cache/hot/images_1.json</li>
     <li><code>/debug</code> - Check Chromium availability</li>
     </ul>
