@@ -51,12 +51,12 @@ app.get('/api/album/:model/:index', async (req, res) => {
 
     await fs.mkdir(cacheDir, { recursive: true });
 
-    // Check cache first for instant response
+    // Check cache
     try {
       const cachedData = await fs.readFile(cacheFile, 'utf8');
       const images = JSON.parse(cachedData);
       if (images.length > 0) {
-        console.log(`Serving ${images.length} cached images for ${model} at index ${index} [FAST]`);
+        console.log(`Serving ${images.length} cached images for ${model} at index ${index}`);
         return res.json({
           model,
           index,
@@ -65,6 +65,9 @@ app.get('/api/album/:model/:index', async (req, res) => {
           source: 'cache',
           cache_file: cacheFile
         });
+      } else {
+        console.log(`Empty cache for ${model} at index ${index}, forcing scrape...`);
+        await fs.unlink(cacheFile).catch(() => {});
       }
     } catch (e) {
       console.log(`No valid cache for ${model} at index ${index}, scraping...`);
@@ -73,7 +76,7 @@ app.get('/api/album/:model/:index', async (req, res) => {
     let imageData = [];
     let galleryLinks = [];
     let attempts = 0;
-    const maxAttempts = 2; // Reduced attempts for speed
+    const maxAttempts = 3;
 
     while (attempts < maxAttempts && imageData.length === 0) {
       attempts++;
@@ -88,15 +91,15 @@ app.get('/api/album/:model/:index', async (req, res) => {
             '--disable-gpu',
             '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36',
             '--disable-features=IsolateOrigins,site-per-process',
-            '--blink-settings=imagesEnabled=false' // Disable image loading to speed up
+            '--blink-settings=imagesEnabled=true'
           ],
-          timeout: 30000 // Reduced timeout
+          timeout: 90000
         });
         const context = await browser.newContext({
           viewport: { width: 1280, height: 720 },
           extraHTTPHeaders: {
             'Accept-Language': 'en-US,en;q=0.9',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
           }
         });
         if (process.env.PROXY_SERVER) {
@@ -104,28 +107,57 @@ app.get('/api/album/:model/:index', async (req, res) => {
         }
         const page = await context.newPage();
 
-        // Navigate to search page
+        // Navigate to search page to collect random gallery links
         const searchUrl = `https://ahottie.net/search?kw=${encodeURIComponent(model)}`;
         console.log(`Navigating to: ${searchUrl}`);
-        const response = await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }); // Faster wait
+
+        let response;
+        try {
+          response = await page.goto(searchUrl, { waitUntil: 'networkidle', timeout: 90000 });
+        } catch (navError) {
+          console.error(`Navigation to ${searchUrl} failed: ${navError.message}`);
+          throw navError;
+        }
+
         if (response.status() === 404) {
           throw new Error(`Search page returned 404: ${searchUrl}`);
         }
 
-        // Minimal scroll to load links
-        await page.evaluate(() => {
-          window.scrollTo(0, document.body.scrollHeight / 2); // Scroll halfway only
-        });
-        await delay(5000); // Reduced delay
+        await delay(12000);
 
-        // Collect gallery links and shuffle
+        // Scroll to load all gallery links
+        await page.evaluate(async () => {
+          await new Promise((resolve) => {
+            let totalHeight = 0;
+            const distance = 200;
+            const maxScrolls = 100;
+            let scrollCount = 0;
+            const timer = setInterval(() => {
+              const scrollHeight = document.body.scrollHeight;
+              window.scrollBy(0, distance);
+              totalHeight += distance;
+              scrollCount++;
+              if (totalHeight >= scrollHeight || scrollCount >= maxScrolls) {
+                clearInterval(timer);
+                resolve();
+              }
+            }, 200);
+          });
+        });
+
+        await delay(10000);
+
+        // Collect gallery links and shuffle randomly
         galleryLinks = await page.evaluate(() => {
           const links = [];
           const selectors = [
             'a[href*="/albums/"]',
             'a[href*="/gallery/"]',
             '.post-title a', '.entry-title a', 'h2 a', 'h3 a', '.post a',
-            '.gallery a', 'a[href*="/photo/"]'
+            '.gallery a', 'a[href*="/photo/"]',
+            '.thumb a', '.image-link', '.post-thumbnail a', '.wp-block-gallery a',
+            'a[href*="/tags/"]',
+            'a[href*="ahottie.net"]'
           ];
 
           selectors.forEach(selector => {
@@ -140,12 +172,13 @@ app.get('/api/album/:model/:index', async (req, res) => {
             });
           });
 
+          // Shuffle links randomly
           for (let i = links.length - 1; i > 0; i--) {
             const j = Math.floor(Math.random() * (i + 1));
             [links[i], links[j]] = [links[j], links[i]];
           }
 
-          return [...new Set(links)].slice(0, 10); // Limit to 10 links for speed
+          return [...new Set(links)].slice(0, 20); // Limit to 20 random links
         });
 
         console.log(`Found ${galleryLinks.length} random links for ${model}`);
@@ -159,40 +192,113 @@ app.get('/api/album/:model/:index', async (req, res) => {
           await browser.close();
           return res.status(400).json({
             error: `Invalid index ${index}. Must be between 1 and ${galleryLinks.length}.`,
-            debug: { search_url: searchUrl, links_found: galleryLinks.length }
+            debug: {
+              search_url: searchUrl,
+              links_found: galleryLinks.length,
+              links: galleryLinks
+            }
           });
         }
 
-        // Navigate to the random gallery link
+        // Navigate to the random gallery link at the specified index
         const galleryLink = galleryLinks[indexNum - 1];
-        console.log(`Navigating to gallery: ${galleryLink}`);
-        await page.goto(galleryLink, { waitUntil: 'domcontentloaded', timeout: 20000 }); // Faster wait
-        await delay(3000); // Reduced delay
+        console.log(`Navigating to random gallery: ${galleryLink}`);
+        try {
+          response = await page.goto(galleryLink, { waitUntil: 'networkidle', timeout: 60000 });
+        } catch (galleryError) {
+          console.error(`Failed to navigate to ${galleryLink}: ${galleryError.message}`);
+          throw galleryError;
+        }
 
-        // Minimal scroll in gallery
-        await page.evaluate(() => {
-          window.scrollTo(0, document.body.scrollHeight / 2); // Scroll halfway
+        if (response.status() === 404) {
+          throw new Error(`Gallery page returned 404: ${galleryLink}`);
+        }
+
+        await delay(12000);
+
+        // Scroll to load all images in the gallery
+        await page.evaluate(async () => {
+          await new Promise((resolve) => {
+            let totalHeight = 0;
+            const distance = 200;
+            const maxScrolls = 100;
+            let scrollCount = 0;
+            const timer = setInterval(() => {
+              const scrollHeight = document.body.scrollHeight;
+              window.scrollBy(0, distance);
+              totalHeight += distance;
+              scrollCount++;
+              if (totalHeight >= scrollHeight || scrollCount >= maxScrolls) {
+                clearInterval(timer);
+                resolve();
+              }
+            }, 200);
+          });
         });
-        await delay(2000); // Reduced delay
 
-        // Collect image links only (no full image load)
+        await delay(10000);
+
+        // Collect all image URLs and thumbnails from the gallery page
         imageData = await page.evaluate(() => {
           const items = [];
           const anchors = document.querySelectorAll('a[href]');
           anchors.forEach(a => {
             const href = a.href;
             if (/\.(jpg|jpeg|png|gif|webp|bmp)$/i.test(href)) {
-              items.push({ url: href, thumb: href }); // Thumb as URL for speed
+              const img = a.querySelector('img');
+              let thumb = null;
+              if (img) {
+                thumb = img.src ||
+                  img.getAttribute('data-src') ||
+                  img.getAttribute('data-lazy-src') ||
+                  img.getAttribute('data-original') ||
+                  (img.getAttribute('srcset')?.split(',')[0]?.split(' ')[0]);
+              } else {
+                const style = a.getAttribute('style');
+                const match = style?.match(/background-image:\s?url\(['"]?(.+?)['"]?\)/i);
+                thumb = match ? match[1] : null;
+              }
+              const isRelevant = href.includes('ahottie.net') ||
+                href.includes('imgbox.com') ||
+                href.includes('wp-content');
+              if (isRelevant && href) {
+                items.push({
+                  url: href,
+                  thumb: thumb || href
+                });
+              }
             }
           });
-          const images = document.querySelectorAll('img');
-          images.forEach(img => {
-            const src = img.src || img.getAttribute('data-src');
+
+          const images = Array.from(document.querySelectorAll('img, [style*="background-image"]'));
+          images.forEach(element => {
+            let src;
+            if (element.tagName.toLowerCase() === 'img') {
+              src = element.src ||
+                element.getAttribute('data-src') ||
+                element.getAttribute('data-lazy-src') ||
+                element.getAttribute('data-original') ||
+                (element.getAttribute('srcset')?.split(',')[0]?.split(' ')[0]);
+            } else {
+              const style = element.getAttribute('style');
+              const match = style?.match(/background-image:\s?url\(['"]?(.+?)['"]?\)/i);
+              src = match ? match[1] : null;
+            }
+
             if (src && /\.(jpg|jpeg|png|gif|webp|bmp)$/i.test(src)) {
-              items.push({ url: src, thumb: src });
+              const isRelevant = src.includes('ahottie.net') ||
+                src.includes('imgbox.com') ||
+                src.includes('wp-content');
+              if (isRelevant && !items.some(item => item.url === src)) {
+                items.push({
+                  url: src,
+                  thumb: src
+                });
+              }
             }
           });
-          return [...new Set(items.map(item => JSON.stringify(item)))].map(str => JSON.parse(str)).slice(0, 20); // Limit to 20
+
+          return [...new Set(items.map(item => JSON.stringify(item)))].map(str => JSON.parse(str));
         });
 
         console.log(`Found ${imageData.length} images in ${galleryLink}`);
@@ -201,8 +307,11 @@ app.get('/api/album/:model/:index', async (req, res) => {
         browser = null;
 
       } catch (playwrightError) {
-        console.error(`Playwright attempt ${attempts} failed: ${playwrightError.message}`);
-        if (browser) await browser.close();
+        console.error(`Playwright attempt ${attempts} failed for ${model} at index ${index}: ${playwrightError.message}`);
+        if (browser) {
+          await browser.close();
+          browser = null;
+        }
       }
     }
 
@@ -210,18 +319,28 @@ app.get('/api/album/:model/:index', async (req, res) => {
       await fs.writeFile(cacheFile, JSON.stringify([]));
       return res.status(404).json({
         error: `No images found for "${model}" at index ${index}.`,
-        suggestion: `Try "Mia Nanasawa" or "LinXingLan".`,
-        debug: { search_url: searchUrl, gallery_url: galleryLinks[indexNum - 1] || 'N/A' }
+        suggestion: `Try "Mia Nanasawa" or "LinXingLan". Visit https://ahottie.net/search?kw=${encodeURIComponent(model)} to confirm.`,
+        debug: {
+          search_url: `https://ahottie.net/search?kw=${encodeURIComponent(model)}`,
+          gallery_url: galleryLinks[parseInt(index) - 1] || 'N/A',
+          attempts_made: attempts,
+          links_found: galleryLinks.length,
+          links: galleryLinks
+        }
       });
     }
 
-    // Format and cache
-    const images = imageData.map((data, idx) => ({
-      id: idx + 1,
-      name: `image_${idx + 1}.${data.url.split('.').pop().split('?')[0] || 'jpg'}`,
-      url: data.url,
-      thumb: data.thumb
-    }));
+    // Format images for response and caching
+    const images = imageData.map((data, idx) => {
+      const fileExt = data.url.split('.').pop().split('?')[0] || 'jpg';
+      return {
+        id: idx + 1,
+        name: `image_${idx + 1}.${fileExt}`,
+        url: data.url,
+        thumb: data.thumb
+      };
+    });
+
     await fs.writeFile(cacheFile, JSON.stringify(images, null, 2));
 
     res.json({
@@ -230,14 +349,22 @@ app.get('/api/album/:model/:index', async (req, res) => {
       album: images,
       total: images.length,
       source: 'ahottie.net',
-      search_url: searchUrl,
-      gallery_url: galleryLinks[indexNum - 1],
+      search_url: `https://ahottie.net/search?kw=${encodeURIComponent(model)}`,
+      gallery_url: galleryLinks[parseInt(index) - 1] || 'N/A',
       cache_file: cacheFile
     });
   } catch (error) {
-    if (browser) await browser.close();
+    if (browser) {
+      await browser.close();
+    }
     console.error(`Error for ${req.params.model} at index ${req.params.index}: ${error.message}`);
-    res.status(500).json({ error: `Server error: ${error.message}`, debug: { timestamp: new Date().toISOString() } });
+    res.status(500).json({
+      error: `Server error: ${error.message}`,
+      debug: {
+        search_url: `https://ahottie.net/search?kw=${encodeURIComponent(req.params.model)}`,
+        timestamp: new Date().toISOString()
+      }
+    });
   }
 });
 
@@ -245,33 +372,88 @@ app.get('/api/album/:model/:index', async (req, res) => {
 app.get('/api/nsfw/:model/:index', async (req, res) => {
   try {
     const { model, index } = req.params;
-    const cacheFile = path.join(CACHE_DIR, model, `images_${index}.json`);
-    const cachedData = await fs.readFile(cacheFile, 'utf8');
-    const images = JSON.parse(cachedData);
+    const cacheDir = path.join(CACHE_DIR, model);
+    const cacheFile = path.join(cacheDir, `images_${index}.json`);
 
-    if (images.length === 0) {
+    let images = [];
+    try {
+      const cachedData = await fs.readFile(cacheFile, 'utf8');
+      images = JSON.parse(cachedData);
+      if (images.length === 0) {
+        console.log(`Empty cache for ${model} at index ${index}`);
+        return res.status(404).send(`
+          <html>
+          <head><title>Error</title></head>
+          <body>
+          <h1>Error</h1>
+          <p>No images found in cache for ${model} at index ${index}.</p>
+          <p>Run <a href="/api/album/${encodeURIComponent(model)}/${index}">/api/album/${encodeURIComponent(model)}/${index}</a> first.</p>
+          </body>
+          </html>
+        `);
+      }
+    } catch (e) {
+      console.log(`No cache file found for ${model} at index ${index}`);
       return res.status(404).send(`
-        <html><body><h1>Error</h1><p>No images in cache. Run /api/album/${encodeURIComponent(model)}/${index} first.</p></body></html>
+        <html>
+        <head><title>Error</title></head>
+        <body>
+        <h1>Error</h1>
+        <p>No cached images for ${model} at index ${index}.</p>
+        <p>Run <a href="/api/album/${encodeURIComponent(model)}/${index}">/api/album/${encodeURIComponent(model)}/${index}</a> first.</p>
+        </body>
+        </html>
       `);
     }
 
     const imageHtml = images.map(img => `
-      <div><h3>${img.name}</h3><img src="${img.url}" alt="${img.name}" style="max-width:100%;max-height:600px;"></div>
+      <div style="margin-bottom: 20px;">
+      <h3>${img.name}</h3>
+      <img src="${img.url}" alt="${img.name}" style="max-width: 100%; height: auto; max-height: 600px;">
+      </div>
     `).join('');
+
     res.send(`
-      <html><head><title>Images for ${model}</title><style>body{margin:40px;font-family:Arial;}img{display:block;}</style></head>
-      <body><h1>Images for ${model} (Index ${index})</h1><p>Total: ${images.length}</p>${imageHtml}</body></html>
+      <html>
+      <head>
+      <title>Images for ${model} (Index ${index})</title>
+      <style>
+      body { font-family: Arial, sans-serif; margin: 40px; }
+      h1 { color: #333; }
+      h3 { margin: 10px 0 5px; }
+      img { display: block; }
+      a { color: #0066cc; text-decoration: none; }
+      a:hover { text-decoration: underline; }
+      </style>
+      </head>
+      <body>
+      <h1>Images for ${model} (Index ${index})</h1>
+      <p>Total images: ${images.length}</p>
+      <p><a href="/api/album/${encodeURIComponent(model)}/${index}">Refresh cache</a></p>
+      ${imageHtml}
+      </body>
+      </html>
     `);
   } catch (error) {
-    res.status(500).send(`<html><body><h1>Error</h1><p>Server error: ${error.message}</p></body></html>`);
+    console.error(`NSFW endpoint error for ${req.params.model} at index ${req.params.index}: ${error.message}`);
+    res.status(500).send(`
+      <html>
+      <head><title>Error</title></head>
+      <body>
+      <h1>Error</h1>
+      <p>Server error: ${error.message}</p>
+      </body>
+      </html>
+    `);
   }
 });
 
-// Debug endpoint
+// Debug endpoint to check Chromium
 app.get('/debug', async (req, res) => {
   try {
-    await fs.access(process.env.PLAYWRIGHT_EXECUTABLE_PATH || '/usr/bin/chromium');
-    res.send('Chromium found');
+    const executablePath = process.env.PLAYWRIGHT_EXECUTABLE_PATH || '/usr/bin/chromium';
+    await fs.access(executablePath);
+    res.send(`Chromium found at ${executablePath}`);
   } catch (error) {
     res.send(`Chromium not found: ${error.message}`);
   }
@@ -281,13 +463,42 @@ app.get('/debug', async (req, res) => {
 app.get('/', (req, res) => {
   const baseUrl = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
   res.send(`
-    <html><head><title>Image Scraper API</title><style>body{margin:40px;font-family:Arial;}</style></head>
-    <body><h1>Image Scraper API Ready</h1><p>Endpoints: /api/album/hot/1, /api/nsfw/hot/1, /debug</p>
-    <p>Examples: <a href="${baseUrl}/api/album/hot/1" target="_blank">${baseUrl}/api/album/hot/1</a></p></body></html>
+    <html>
+    <head>
+    <title>Image Scraper API</title>
+    <style>
+    body { font-family: Arial, sans-serif; margin: 40px; }
+    code { background: #f4f4f4; padding: 2px 6px; border-radius: 3px; }
+    li { margin: 10px 0; }
+    </style>
+    </head>
+    <body>
+    <h1>Image Scraper API Ready</h1>
+    <p>Using search URL: <code>https://ahottie.net/search?kw=modelname</code></p>
+    
+    <p>Endpoints:</p>
+    <ul>
+    <li><code>/api/album/hot/1</code> - Scrape images from random 1st gallery and save to cache</li>
+    <li><code>/api/nsfw/hot/1</code> - Display images from cache/hot/images_1.json</li>
+    <li><code>/debug</code> - Check Chromium availability</li>
+    </ul>
+    
+    <p>Example Searches (Random each time due to shuffle):</p>
+    <ul>
+    <li><a href="/api/album/hot/1" target="_blank">${baseUrl}/api/album/hot/1</a></li>
+    <li><a href="/api/nsfw/hot/1" target="_blank">${baseUrl}/api/nsfw/hot/1</a></li>
+    <li><a href="/api/album/hot/2" target="_blank">${baseUrl}/api/album/hot/2</a></li>
+    <li><a href="/api/nsfw/hot/2" target="_blank">${baseUrl}/api/nsfw/hot/2</a></li>
+    <li><a href="/debug" target="_blank">${baseUrl}/debug</a></li>
+    </ul>
+    </body>
+    </html>
   `);
 });
 
+// Start server
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
+  console.log(`Using search URL: https://ahottie.net/search?kw=modelname`);
   console.log(`Health check: ${process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`}`);
 });
