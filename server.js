@@ -71,6 +71,7 @@ app.get('/api/album/:model/:index', async (req, res) => {
         console.log(`Scraping attempt ${attempts}/${maxAttempts} for ${model} at index ${index}...`);
         browser = await playwright.chromium.launch({
           headless: true,
+          executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH || '/usr/bin/chromium-browser',
           args: [
             '--no-sandbox',
             '--disable-setuid-sandbox',
@@ -441,7 +442,8 @@ app.get('/', (req, res) => {
         <ul>
           <li><a href="/api/album/cosplay/5" target="_blank">${baseUrl}/api/album/cosplay/5</a></li>
           <li><a href="/api/nsfw/cosplay/5" target="_blank">${baseUrl}/api/nsfw/cosplay/5</a></li>
-          <li><a href="/api/album/Mia%20Nanasawa/1" target="_blank">${baseUrl}/api/album/Mia%20Nanasawa/1</a></li>
+          <li><a href="/api/album/horny/9" target="_blank">${baseUrl}/api/album/horny/9</a></li>
+          <li><a href="/api/nsfw/horny/9" target="_blank">${baseUrl}/api/nsfw/horny/9</a></li>
         </ul>
       </body>
     </html>
