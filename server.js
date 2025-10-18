@@ -106,49 +106,33 @@ app.get('/api/album/:model/:index', async (req, res) => {
             '--no-sandbox',
             '--disable-setuid-sandbox',
             '--disable-gpu',
-            '--disable-dev-shm-usage',
-            '--disable-accelerated-2d-canvas',
-            '--no-first-run',
-            '--no-zygote',
-            '--disable-web-security',
-            '--disable-features=VizDisplayCompositor',
-            '--disable-background-timer-throttling',
             '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36'
           ],
           timeout: 60000
         });
 
         const context = await browser.newContext({
-          viewport: { width: 1280, height: 720 },
+          viewport: { width: 1280, height: 720 }
         });
-
-        // Block images, fonts, stylesheets for faster loading
-        await context.route('**/*.{png,jpg,jpeg,gif,webp,svg,ico}', route => route.abort());
-        await context.route('**/*.{woff,woff2,eot,ttf}', route => route.abort());
-        await context.route('**/*.css', route => route.abort());
 
         const page = await context.newPage();
 
         // Navigate to search page
         console.log(`Navigating to: ${searchUrl}`);
-        const response = await page.goto(searchUrl, { 
-          waitUntil: 'domcontentloaded', 
-          timeout: 90000 
-        });
-        
+        const response = await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 90000 });
         if (!response || response.status() === 404) {
           throw new Error(`Search page returned ${response ? response.status() : 'no response'}: ${searchUrl}`);
         }
 
-        // Wait for content with shorter timeout
-        await page.waitForSelector('body', { timeout: 15000 }).catch(() => console.log('Body selector timeout, proceeding...'));
+        // Wait for content
+        await page.waitForSelector('body', { timeout: 45000 }).catch(() => console.log('Body selector timeout, proceeding...'));
 
-        // Fast scroll - reduced iterations
+        // Scroll to load gallery links
         await page.evaluate(async () => {
           await new Promise(resolve => {
             let totalHeight = 0;
-            const distance = 300; // Increased scroll distance
-            const maxScrolls = 15; // Reduced from 30 to 15
+            const distance = 200;
+            const maxScrolls = 30;
             let scrollCount = 0;
             const timer = setInterval(() => {
               const scrollHeight = document.body.scrollHeight;
@@ -159,43 +143,34 @@ app.get('/api/album/:model/:index', async (req, res) => {
                 clearInterval(timer);
                 resolve();
               }
-            }, 50); // Faster interval
+            }, 100);
           });
         });
 
-        // Collect gallery links - optimized selector
+        // Collect gallery links
         galleryLinks = await page.evaluate(() => {
-          const links = new Set();
-          // Focus on most common selectors first
+          const links = [];
           const selectors = [
             'a[href*="/albums/"]',
             'a[href*="/gallery/"]',
-            '.post-title a',
-            '.entry-title a',
-            'h2 a',
-            '.gallery a',
-            '.thumb a'
+            '.post-title a', '.entry-title a', 'h2 a', 'h3 a', '.post a',
+            '.gallery a', '.thumb a', '.image-link', '.post-thumbnail a'
           ];
-          
           selectors.forEach(selector => {
-            const elements = document.querySelectorAll(selector);
-            for (let i = 0; i < elements.length; i++) {
-              const a = elements[i];
+            document.querySelectorAll(selector).forEach(a => {
               const href = a.href;
-              if (href && 
-                  href.includes('ahottie.net') &&
-                  !href.includes('/page/') &&
-                  !href.includes('/search') &&
-                  !href.includes('/?s=') &&
-                  !href.includes('#') &&
-                  !href.includes('/tags/') &&
-                  a.querySelector('img')) {
-                links.add(href);
+              if (href && href.includes('ahottie.net') &&
+                !href.includes('/page/') &&
+                !href.includes('/search') &&
+                !href.includes('/?s=') &&
+                !href.includes('#') &&
+                !href.includes('/tags/') &&
+                a.querySelector('img')) {
+                links.push(href);
               }
-            }
+            });
           });
-          
-          return Array.from(links).slice(0, 10);
+          return [...new Set(links)].slice(0, 10);
         });
 
         console.log(`Found ${galleryLinks.length} gallery links for ${model}`);
@@ -211,33 +186,26 @@ app.get('/api/album/:model/:index', async (req, res) => {
         // Navigate to gallery
         const baseGalleryLink = galleryLinks[indexNum - 1];
         console.log(`Base gallery URL: ${baseGalleryLink}`);
-        const maxPages = 5; // RESTORED to 5 pages as you requested
+        const maxPages = 5; // Scrape pages 1 to 5
 
         for (let pageNum = 1; pageNum <= maxPages; pageNum++) {
           const galleryLink = pageNum === 1 ? baseGalleryLink : `${baseGalleryLink}?page=${pageNum}`;
           console.log(`Navigating to gallery page ${pageNum}: ${galleryLink}`);
-          
-          const galleryResponse = await page.goto(galleryLink, { 
-            waitUntil: 'domcontentloaded', 
-            timeout: 90000 
-          });
-          
+          const galleryResponse = await page.goto(galleryLink, { waitUntil: 'domcontentloaded', timeout: 90000 });
           if (!galleryResponse || galleryResponse.status() === 404) {
-            console.log(`Page ${pageNum} not found, stopping pagination`);
-            break;
+            console.log(`Page ${pageNum} not found or returned ${galleryResponse ? galleryResponse.status() : 'no response'}, stopping pagination`);
+            break; // Stop if the page doesn't exist
           }
 
-          // Wait for images with shorter timeout
-          await page.waitForSelector('img', { timeout: 10000 }).catch(() => 
-            console.log(`Image selector timeout on page ${pageNum}, proceeding...`)
-          );
+          // Wait for images
+          await page.waitForSelector('img, [style*="background-image"]', { timeout: 45000 }).catch(() => console.log(`Image selector timeout on page ${pageNum}, proceeding...`));
 
-          // Fast scroll for gallery
+          // Scroll gallery page
           await page.evaluate(async () => {
             await new Promise(resolve => {
               let totalHeight = 0;
-              const distance = 400; // Even faster scroll
-              const maxScrolls = 10; // Fewer scrolls
+              const distance = 200;
+              const maxScrolls = 30;
               let scrollCount = 0;
               const timer = setInterval(() => {
                 const scrollHeight = document.body.scrollHeight;
@@ -248,70 +216,39 @@ app.get('/api/album/:model/:index', async (req, res) => {
                   clearInterval(timer);
                   resolve();
                 }
-              }, 30); // Very fast interval
+              }, 100);
             });
           });
 
-          // Optimized image collection
+          // Collect images
           const pageImages = await page.evaluate(() => {
             const items = [];
-            const seenUrls = new Set();
-            
-            // Get all images first
-            const imgElements = document.querySelectorAll('img[src]');
-            
-            for (let i = 0; i < imgElements.length; i++) {
-              const img = imgElements[i];
-              let src = img.src || img.getAttribute('data-src') || img.getAttribute('data-lazy-src');
-              
-              if (src && /\.(jpg|jpeg|png|gif|webp)/i.test(src)) {
-                // Skip small images (likely icons)
-                if (img.naturalWidth > 100 && img.naturalHeight > 100) {
-                  const normalizedSrc = src.split('?')[0];
-                  if (!seenUrls.has(normalizedSrc)) {
-                    seenUrls.add(normalizedSrc);
-                    items.push({ 
-                      url: src, 
-                      thumb: src 
-                    });
-                  }
+            const selectors = [
+              'img[src*=".jpg"], img[src*=".jpeg"], img[src*=".png"], img[src*=".gif"], img[src*=".webp"]',
+              'a[href*=".jpg"], a[href*=".jpeg"], a[href*=".png"], a[href*=".gif"], a[href*=".webp"]'
+            ];
+            selectors.forEach(selector => {
+              document.querySelectorAll(selector).forEach(el => {
+                let src, thumb;
+                if (el.tagName.toLowerCase() === 'img') {
+                  src = el.src || el.getAttribute('data-src') || el.getAttribute('data-lazy-src') || el.getAttribute('data-original');
+                  thumb = src;
+                } else if (el.tagName.toLowerCase() === 'a') {
+                  src = el.href;
+                  const img = el.querySelector('img');
+                  thumb = img ? (img.src || img.getAttribute('data-src') || img.getAttribute('data-lazy-src') || src) : src;
                 }
-              }
-            }
-            
-            // Then check links to images
-            const linkElements = document.querySelectorAll('a[href*=".jpg"], a[href*=".jpeg"], a[href*=".png"], a[href*=".gif"], a[href*=".webp"]');
-            
-            for (let i = 0; i < linkElements.length; i++) {
-              const link = linkElements[i];
-              const href = link.href;
-              if (href && /\.(jpg|jpeg|png|gif|webp)$/i.test(href)) {
-                const normalizedHref = href.split('?')[0];
-                if (!seenUrls.has(normalizedHref)) {
-                  seenUrls.add(normalizedHref);
-                  let thumb = href;
-                  const img = link.querySelector('img');
-                  if (img && img.src) {
-                    thumb = img.src;
-                  }
-                  items.push({ 
-                    url: href, 
-                    thumb: thumb 
-                  });
+                if (src && /\.(jpg|jpeg|png|gif|webp)$/i.test(src) &&
+                  (src.includes('ahottie.net') || src.includes('imgbox.com') || src.includes('wp-content'))) {
+                  items.push({ url: src, thumb: thumb || src });
                 }
-              }
-            }
-            
+              });
+            });
             return items;
           });
 
-          console.log(`Found ${pageImages.length} images on page ${pageNum}`);
+          console.log(`Found ${pageImages.length} images on page ${pageNum} of ${galleryLink}`);
           imageData.push(...pageImages);
-          
-          // Small delay between pages
-          if (pageNum < maxPages) {
-            await delay(500);
-          }
         }
 
         await browser.close();
@@ -381,7 +318,7 @@ app.get('/api/album/:model/:index', async (req, res) => {
   }
 });
 
-// Other endpoints remain the same
+// Other endpoints (unchanged)
 app.get('/api/nsfw/:model/:index', async (req, res) => {
   try {
     const { model, index } = req.params;
