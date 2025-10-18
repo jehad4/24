@@ -51,6 +51,7 @@ app.get('/api/album/:model/:index', async (req, res) => {
 
     await fs.mkdir(cacheDir, { recursive: true });
 
+    // Check cache
     try {
       const cachedData = await fs.readFile(cacheFile, 'utf8');
       const images = JSON.parse(cachedData);
@@ -106,6 +107,7 @@ app.get('/api/album/:model/:index', async (req, res) => {
         }
         const page = await context.newPage();
 
+        // Navigate to search page to collect random gallery links
         const searchUrl = `https://ahottie.net/search?kw=${encodeURIComponent(model)}`;
         console.log(`Navigating to: ${searchUrl}`);
 
@@ -123,11 +125,12 @@ app.get('/api/album/:model/:index', async (req, res) => {
 
         await delay(12000);
 
+        // Scroll to load all gallery links
         await page.evaluate(async () => {
           await new Promise((resolve) => {
             let totalHeight = 0;
             const distance = 200;
-            const maxScrolls = 60;
+            const maxScrolls = 100;
             let scrollCount = 0;
             const timer = setInterval(() => {
               const scrollHeight = document.body.scrollHeight;
@@ -142,14 +145,16 @@ app.get('/api/album/:model/:index', async (req, res) => {
           });
         });
 
-        await delay(12000);
+        await delay(10000);
 
+        // Collect gallery links randomly by shuffling
         galleryLinks = await page.evaluate(() => {
           const links = [];
           const selectors = [
-            'a[href*="/20"]',
+            'a[href*="/albums/"]',
+            'a[href*="/gallery/"]',
             '.post-title a', '.entry-title a', 'h2 a', 'h3 a', '.post a',
-            '.gallery a', 'a[href*="/gallery/"]', 'a[href*="/photo/"]',
+            '.gallery a', 'a[href*="/photo/"]',
             '.thumb a', '.image-link', '.post-thumbnail a', '.wp-block-gallery a',
             'a[href*="/tags/"]',
             'a[href*="ahottie.net"]'
@@ -167,10 +172,20 @@ app.get('/api/album/:model/:index', async (req, res) => {
             });
           });
 
-          return [...new Set(links)];
+          // Shuffle links to make them random
+          for (let i = links.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [links[i], links[j]] = [links[j], links[i]];
+          }
+
+          return [...new Set(links)].slice(0, 20); // Limit to 20 random links
         });
 
-        console.log(`Found ${galleryLinks.length} links for ${model}: ${galleryLinks.join(', ')}`);
+        console.log(`Found ${galleryLinks.length} random links for ${model}`);
+
+        if (galleryLinks.length === 0) {
+          throw new Error(`No gallery links found for ${model}`);
+        }
 
         const indexNum = parseInt(index, 10);
         if (isNaN(indexNum) || indexNum < 1 || indexNum > galleryLinks.length) {
@@ -185,8 +200,9 @@ app.get('/api/album/:model/:index', async (req, res) => {
           });
         }
 
+        // Navigate directly to the random gallery link at the specified index
         const galleryLink = galleryLinks[indexNum - 1];
-        console.log(`Navigating to: ${galleryLink}`);
+        console.log(`Navigating to random gallery: ${galleryLink}`);
         try {
           response = await page.goto(galleryLink, { waitUntil: 'networkidle', timeout: 60000 });
         } catch (galleryError) {
@@ -195,16 +211,17 @@ app.get('/api/album/:model/:index', async (req, res) => {
         }
 
         if (response.status() === 404) {
-          throw new Error(`Page returned 404: ${galleryLink}`);
+          throw new Error(`Gallery page returned 404: ${galleryLink}`);
         }
 
         await delay(12000);
 
+        // Scroll to load all images in the gallery
         await page.evaluate(async () => {
           await new Promise((resolve) => {
             let totalHeight = 0;
             const distance = 200;
-            const maxScrolls = 100; // Increased max scrolls for better loading
+            const maxScrolls = 100;
             let scrollCount = 0;
             const timer = setInterval(() => {
               const scrollHeight = document.body.scrollHeight;
@@ -221,8 +238,10 @@ app.get('/api/album/:model/:index', async (req, res) => {
 
         await delay(10000);
 
+        // Collect image URLs and thumbnails from the gallery page
         imageData = await page.evaluate(() => {
           const items = [];
+          // Look for direct image links in <a> tags
           const anchors = document.querySelectorAll('a[href]');
           anchors.forEach(a => {
             const href = a.href;
@@ -246,17 +265,47 @@ app.get('/api/album/:model/:index', async (req, res) => {
               if (isRelevant && href) {
                 items.push({
                   url: href,
-                  thumb: thumb || href // Use full URL as thumb if no separate thumb found
+                  thumb: thumb || href
                 });
               }
             }
           });
-          return items.slice(0, 50);
+
+          // Also collect direct img tags as fallback
+          const images = Array.from(document.querySelectorAll('img, [style*="background-image"]'));
+          images.forEach(element => {
+            let src;
+            if (element.tagName.toLowerCase() === 'img') {
+              src = element.src ||
+                element.getAttribute('data-src') ||
+                element.getAttribute('data-lazy-src') ||
+                element.getAttribute('data-original') ||
+                (element.getAttribute('srcset')?.split(',')[0]?.split(' ')[0]);
+            } else {
+              const style = element.getAttribute('style');
+              const match = style?.match(/background-image:\s?url\(['"]?(.+?)['"]?\)/i);
+              src = match ? match[1] : null;
+            }
+
+            if (src && /\.(jpg|jpeg|png|gif|webp|bmp)$/i.test(src)) {
+              const isRelevant = src.includes('ahottie.net') ||
+                src.includes('imgbox.com') ||
+                src.includes('wp-content');
+              if (isRelevant && !items.some(item => item.url === src)) {
+                items.push({
+                  url: src,
+                  thumb: src
+                });
+              }
+            }
+          });
+
+          return [...new Set(items.map(item => JSON.stringify(item)))].map(str => JSON.parse(str)).slice(0, 50);
         });
 
         console.log(`Found ${imageData.length} images in ${galleryLink}`);
 
-        // Fallback to search page if no images
+        // Fallback to search page if no images in gallery
         if (imageData.length === 0) {
           console.log(`No images in gallery, falling back to search page...`);
           await page.goto(searchUrl, { waitUntil: 'networkidle', timeout: 60000 });
@@ -344,6 +393,7 @@ app.get('/api/album/:model/:index', async (req, res) => {
       });
     }
 
+    // Format images for response and caching
     const images = imageData.map((data, idx) => {
       const fileExt = data.url.split('.').pop().split('?')[0] || 'jpg';
       return {
@@ -491,17 +541,17 @@ app.get('/', (req, res) => {
     
     <p>Endpoints:</p>
     <ul>
-    <li><code>/api/album/cosplay/5</code> - Scrape images from 5th gallery and save to cache</li>
-    <li><code>/api/nsfw/cosplay/5</code> - Display images from cache/cosplay/images_5.json</li>
+    <li><code>/api/album/hot/1</code> - Scrape images from random 1st gallery (shuffled) and save to cache</li>
+    <li><code>/api/nsfw/hot/1</code> - Display images from cache/hot/images_1.json</li>
     <li><code>/debug</code> - Check Chromium availability</li>
     </ul>
     
-    <p>Example Searches:</p>
+    <p>Example Searches (Random each time due to shuffle):</p>
     <ul>
-    <li><a href="/api/album/cosplay/5" target="_blank">${baseUrl}/api/album/cosplay/5</a></li>
-    <li><a href="/api/nsfw/cosplay/5" target="_blank">${baseUrl}/api/nsfw/cosplay/5</a></li>
-    <li><a href="/api/album/horny/9" target="_blank">${baseUrl}/api/album/horny/9</a></li>
-    <li><a href="/api/nsfw/horny/9" target="_blank">${baseUrl}/api/nsfw/horny/9</a></li>
+    <li><a href="/api/album/hot/1" target="_blank">${baseUrl}/api/album/hot/1</a></li>
+    <li><a href="/api/nsfw/hot/1" target="_blank">${baseUrl}/api/nsfw/hot/1</a></li>
+    <li><a href="/api/album/hot/2" target="_blank">${baseUrl}/api/album/hot/2</a></li>
+    <li><a href="/api/nsfw/hot/2" target="_blank">${baseUrl}/api/nsfw/hot/2</a></li>
     <li><a href="/debug" target="_blank">${baseUrl}/debug</a></li>
     </ul>
     </body>
