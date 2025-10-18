@@ -3,16 +3,12 @@ const playwright = require('playwright');
 const fs = require('fs').promises;
 const path = require('path');
 require('dotenv').config();
-
 const app = express();
 const PORT = process.env.PORT || 10000;
 const STORAGE_PATH = process.env.STORAGE_PATH || path.join(__dirname, 'storage');
 const CACHE_DIR = path.join(STORAGE_PATH, 'cache');
-
 app.use(express.json());
-
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
-
 async function ensureDirectories() {
   try {
     await fs.mkdir(CACHE_DIR, { recursive: true });
@@ -22,7 +18,6 @@ async function ensureDirectories() {
     throw error;
   }
 }
-
 async function verifyChromium() {
   const executablePath = process.env.PLAYWRIGHT_EXECUTABLE_PATH || '/usr/bin/chromium';
   try {
@@ -34,33 +29,8 @@ async function verifyChromium() {
     throw error;
   }
 }
-
-// Function to remove duplicate images
-function removeDuplicateImages(images) {
-  const seen = new Set();
-  const uniqueImages = [];
- 
-  for (const image of images) {
-    // Normalize URLs by removing query parameters and fragments
-    const normalizedUrl = image.url.split('?')[0].split('#')[0];
-    const normalizedThumb = image.thumb.split('?')[0].split('#')[0];
-   
-    // Create a unique key using both URL and thumbnail
-    const key = `${normalizedUrl}|${normalizedThumb}`;
-   
-    if (!seen.has(key)) {
-      seen.add(key);
-      uniqueImages.push(image);
-    }
-  }
- 
-  console.log(`Removed ${images.length - uniqueImages.length} duplicate images`);
-  return uniqueImages;
-}
-
 ensureDirectories().catch(error => console.error(`Directory setup failed: ${error.message}`));
 verifyChromium().catch(error => console.error(`Chromium verification failed: ${error.message}`));
-
 app.get('/api/album/:model/:index', async (req, res) => {
   let browser;
   try {
@@ -94,7 +64,7 @@ app.get('/api/album/:model/:index', async (req, res) => {
     let attempts = 0;
     const maxAttempts = 2;
     const searchUrl = `https://ahottie.net/search?kw=${encodeURIComponent(model)}`;
-    while (attempts < maxAttempts) {
+    while (attempts < maxAttempts && imageData.length === 0) {
       attempts++;
       console.log(`Scraping attempt ${attempts}/${maxAttempts} for ${model} at index ${index}...`);
       try {
@@ -231,7 +201,7 @@ app.get('/api/album/:model/:index', async (req, res) => {
                 }
               });
             });
-            return items;
+            return [...new Set(items.map(item => JSON.stringify(item)))].map(str => JSON.parse(str));
           });
           console.log(`Found ${pageImages.length} images on page ${pageNum} of ${galleryLink}`);
           imageData.push(...pageImages);
@@ -245,23 +215,31 @@ app.get('/api/album/:model/:index', async (req, res) => {
           browser = null;
         }
         if (attempts === maxAttempts) {
-          console.log(`All attempts failed, proceeding with any collected images`);
-          break; // Proceed with any images collected instead of throwing
+          throw error;
         }
       }
     }
-    // Remove duplicate images
-    const uniqueImageData = removeDuplicateImages(imageData);
+    if (imageData.length === 0) {
+      await fs.writeFile(cacheFile, JSON.stringify([]));
+      return res.status(404).json({
+        error: `No images found for "${model}" at index ${index}.`,
+        suggestion: `Try "Mia Nanasawa" or "cosplay". Visit ${searchUrl} to confirm.`,
+        debug: {
+          search_url: searchUrl,
+          gallery_url: galleryLinks[parseInt(index) - 1] || 'N/A',
+          attempts_made: attempts,
+          links_found: galleryLinks.length
+        }
+      });
+    }
     // Format and cache images
-    const images = uniqueImageData.map((data, idx) => ({
+    const images = imageData.map((data, idx) => ({
       id: idx + 1,
       name: `image_${idx + 1}.${data.url.split('.').pop().split('?')[0] || 'jpg'}`,
       url: data.url,
       thumb: data.thumb
     }));
-    // Cache even if no images are found
     await fs.writeFile(cacheFile, JSON.stringify(images, null, 2));
-    // Return response even if no images are found
     res.json({
       model,
       index,
@@ -271,14 +249,7 @@ app.get('/api/album/:model/:index', async (req, res) => {
       search_url: searchUrl,
       gallery_url: galleryLinks[parseInt(index) - 1] || 'N/A',
       cache_file: cacheFile,
-      cached_at: new Date().toISOString(),
-      duplicates_removed: imageData.length - uniqueImageData.length,
-      debug: {
-        attempts_made: attempts,
-        links_found: galleryLinks.length,
-        original_images: imageData.length,
-        unique_images: uniqueImageData.length
-      }
+      cached_at: new Date().toISOString()
     });
   } catch (error) {
     if (browser) await browser.close();
@@ -292,7 +263,7 @@ app.get('/api/album/:model/:index', async (req, res) => {
     });
   }
 });
-
+// Other endpoints (unchanged)
 app.get('/api/nsfw/:model/:index', async (req, res) => {
   try {
     const { model, index } = req.params;
@@ -315,7 +286,6 @@ app.get('/api/nsfw/:model/:index', async (req, res) => {
     res.status(500).send(`<html><body><h1>Error</h1><p>Server error: ${error.message}</p></body></html>`);
   }
 });
-
 app.get('/', (req, res) => {
   const baseUrl = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
   res.send(`
@@ -332,7 +302,6 @@ app.get('/', (req, res) => {
     </body></html>
   `);
 });
-
 app.get('/debug', async (req, res) => {
   try {
     const executablePath = await verifyChromium();
@@ -341,7 +310,6 @@ app.get('/debug', async (req, res) => {
     res.status(500).send(`Chromium not found: ${error.message}`);
   }
 });
-
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
   console.log(`Health check: ${process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`}`);
