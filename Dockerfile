@@ -20,7 +20,7 @@ RUN apt-get update && \
     libxtst6 \
     libnss3 \
     libxss1 \
-    libasound2t64 \
+    libasound2 \
     libatk-bridge2.0-0 \
     libgtk-3-0 && \
     rm -rf /var/lib/apt/lists/*
