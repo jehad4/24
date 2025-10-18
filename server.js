@@ -26,8 +26,20 @@ async function ensureDirectories() {
   }
 }
 
+// Verify Chromium executable
+async function verifyChromium() {
+  const executablePath = process.env.PLAYWRIGHT_EXECUTABLE_PATH || '/usr/bin/chromium';
+  try {
+    await fs.access(executablePath);
+    console.log(`Chromium found at ${executablePath}`);
+  } catch (error) {
+    console.error(`Chromium not found at ${executablePath}: ${error.message}`);
+  }
+}
+
 // Run on startup
 ensureDirectories().catch(error => console.error(`Directory setup failed: ${error.message}`));
+verifyChromium().catch(error => console.error(`Chromium verification failed: ${error.message}`));
 
 // API endpoint: GET /api/album/:model/:index
 app.get('/api/album/:model/:index', async (req, res) => {
@@ -71,7 +83,7 @@ app.get('/api/album/:model/:index', async (req, res) => {
         console.log(`Scraping attempt ${attempts}/${maxAttempts} for ${model} at index ${index}...`);
         browser = await playwright.chromium.launch({
           headless: true,
-          executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH || '/usr/bin/chromium-browser',
+          executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH || '/usr/bin/chromium',
           args: [
             '--no-sandbox',
             '--disable-setuid-sandbox',
@@ -415,6 +427,17 @@ app.get('/api/nsfw/:model/:index', async (req, res) => {
   }
 });
 
+// Debug endpoint to check Chromium
+app.get('/debug', async (req, res) => {
+  try {
+    const executablePath = process.env.PLAYWRIGHT_EXECUTABLE_PATH || '/usr/bin/chromium';
+    await fs.access(executablePath);
+    res.send(`Chromium found at ${executablePath}`);
+  } catch (error) {
+    res.send(`Chromium not found: ${error.message}`);
+  }
+});
+
 // Health check
 app.get('/', (req, res) => {
   const baseUrl = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
@@ -436,6 +459,7 @@ app.get('/', (req, res) => {
         <ul>
           <li><code>/api/album/cosplay/5</code> - Scrape images from 5th gallery and save to cache</li>
           <li><code>/api/nsfw/cosplay/5</code> - Display images from cache/cosplay/images_5.json</li>
+          <li><code>/debug</code> - Check Chromium availability</li>
         </ul>
         
         <p>Example Searches:</p>
@@ -444,6 +468,7 @@ app.get('/', (req, res) => {
           <li><a href="/api/nsfw/cosplay/5" target="_blank">${baseUrl}/api/nsfw/cosplay/5</a></li>
           <li><a href="/api/album/horny/9" target="_blank">${baseUrl}/api/album/horny/9</a></li>
           <li><a href="/api/nsfw/horny/9" target="_blank">${baseUrl}/api/nsfw/horny/9</a></li>
+          <li><a href="/debug" target="_blank">${baseUrl}/debug</a></li>
         </ul>
       </body>
     </html>
