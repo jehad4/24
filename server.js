@@ -3,49 +3,47 @@ const playwright = require('playwright');
 const fs = require('fs').promises;
 const path = require('path');
 require('dotenv').config();
+
 const app = express();
 const PORT = process.env.PORT || 10000;
-
-// Define storage path
 const STORAGE_PATH = process.env.STORAGE_PATH || path.join(__dirname, 'storage');
 const CACHE_DIR = path.join(STORAGE_PATH, 'cache');
 
-// Middleware
 app.use(express.json());
 
-// Delay function
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-// Ensure cache directory exists
 async function ensureDirectories() {
   try {
     await fs.mkdir(CACHE_DIR, { recursive: true });
+    console.log(`Created directory: ${CACHE_DIR}`);
   } catch (error) {
     console.error(`Failed to create directory ${CACHE_DIR}: ${error.message}`);
+    throw error;
   }
 }
 
-// Verify Chromium
 async function verifyChromium() {
+  const executablePath = process.env.PLAYWRIGHT_EXECUTABLE_PATH || '/usr/bin/chromium';
   try {
-    await fs.access(process.env.PLAYWRIGHT_EXECUTABLE_PATH || '/usr/bin/chromium');
+    await fs.access(executablePath);
+    console.log(`Chromium found at ${executablePath}`);
+    return executablePath;
   } catch (error) {
-    console.error(`Chromium not found: ${error.message}`);
+    console.error(`Chromium not found at ${executablePath}: ${error.message}`);
+    throw error;
   }
 }
 
-// Run on startup
-ensureDirectories();
-verifyChromium();
+ensureDirectories().catch(error => console.error(`Directory setup failed: ${error.message}`));
+verifyChromium().catch(error => console.error(`Chromium verification failed: ${error.message}`));
 
-// API endpoint: GET /api/album/:model/:index
 app.get('/api/album/:model/:index', async (req, res) => {
   let browser;
   try {
     const { model, index } = req.params;
     const cacheDir = path.join(CACHE_DIR, model);
     const cacheFile = path.join(cacheDir, `images_${index}.json`);
-
     await fs.mkdir(cacheDir, { recursive: true });
 
     // Check cache
@@ -53,77 +51,187 @@ app.get('/api/album/:model/:index', async (req, res) => {
       const cachedData = await fs.readFile(cacheFile, 'utf8');
       const images = JSON.parse(cachedData);
       if (images.length > 0) {
-        return res.json({ model, index, album: images, total: images.length, source: 'cache' });
+        console.log(`Serving ${images.length} cached images for ${model} at index ${index}`);
+        return res.json({
+          model,
+          index,
+          album: images,
+          total: images.length,
+          source: 'cache',
+          cache_file: cacheFile,
+          cached_at: (await fs.stat(cacheFile)).mtime.toISOString()
+        });
       }
+      console.log(`Empty cache for ${model} at index ${index}, scraping...`);
+      await fs.unlink(cacheFile).catch(() => {});
     } catch (e) {
-      console.log(`No cache for ${model} at index ${index}, scraping...`);
+      console.log(`No valid cache for ${model} at index ${index}, scraping...`);
     }
 
     let imageData = [];
     let galleryLinks = [];
     let attempts = 0;
     const maxAttempts = 2;
+    const searchUrl = `https://ahottie.net/search?kw=${encodeURIComponent(model)}`; // Define searchUrl here
 
     while (attempts < maxAttempts && imageData.length === 0) {
       attempts++;
+      console.log(`Scraping attempt ${attempts}/${maxAttempts} for ${model} at index ${index}...`);
       try {
-        console.log(`Scraping attempt ${attempts}/${maxAttempts} for ${model} at index ${index}...`);
-        browser = await playwright.chromium.launch({ headless: true, timeout: 90000 });
-        const page = await browser.newPage();
+        const executablePath = await verifyChromium();
+        browser = await playwright.chromium.launch({
+          headless: true,
+          executablePath,
+          args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-gpu',
+            '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36'
+          ],
+          timeout: 60000
+        });
+
+        const context = await browser.newContext({
+          viewport: { width: 1280, height: 720 }
+        });
+        const page = await context.newPage();
 
         // Navigate to search page
-        const searchUrl = `https://ahottie.net/search?kw=${encodeURIComponent(model)}`;
         console.log(`Navigating to: ${searchUrl}`);
-        await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 00000 });
+        const response = await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+        if (!response || response.status() === 404) {
+          throw new Error(`Search page returned ${response ? response.status() : 'no response'}: ${searchUrl}`);
+        }
 
-        // Simple scroll
-        await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-        await delay(5000);
+        // Wait for content
+        await page.waitForSelector('body', { timeout: 30000 }).catch(() => console.log('Body selector timeout, proceeding...'));
+
+        // Scroll to load gallery links
+        await page.evaluate(async () => {
+          await new Promise(resolve => {
+            let totalHeight = 0;
+            const distance = 200;
+            const maxScrolls = 30;
+            let scrollCount = 0;
+            const timer = setInterval(() => {
+              const scrollHeight = document.body.scrollHeight;
+              window.scrollBy(0, distance);
+              totalHeight += distance;
+              scrollCount++;
+              if (totalHeight >= scrollHeight || scrollCount >= maxScrolls) {
+                clearInterval(timer);
+                resolve();
+              }
+            }, 100);
+          });
+        });
 
         // Collect gallery links
         galleryLinks = await page.evaluate(() => {
           const links = [];
-          document.querySelectorAll('a[href*="/albums/"]').forEach(a => {
-            if (a.href.includes('ahottie.net') && a.querySelector('img')) {
-              links.push(a.href);
-            }
+          const selectors = [
+            'a[href*="/albums/"]',
+            'a[href*="/gallery/"]',
+            '.post-title a', '.entry-title a', 'h2 a', 'h3 a', '.post a',
+            '.gallery a', '.thumb a', '.image-link', '.post-thumbnail a'
+          ];
+          selectors.forEach(selector => {
+            document.querySelectorAll(selector).forEach(a => {
+              const href = a.href;
+              if (href && href.includes('ahottie.net') &&
+                !href.includes('/page/') &&
+                !href.includes('/search') &&
+                !href.includes('/?s=') &&
+                !href.includes('#') &&
+                !href.includes('/tags/') &&
+                a.querySelector('img')) {
+                links.push(href);
+              }
+            });
           });
-          return links.slice(0, 10); // Limit to 10 links
+          return [...new Set(links)].slice(0, 10);
         });
 
+        console.log(`Found ${galleryLinks.length} gallery links for ${model}`);
         if (galleryLinks.length === 0) {
           throw new Error(`No gallery links found for ${model}`);
         }
 
-        const indexNum = parseInt(index, 10) - 1;
-        if (indexNum < 0 || indexNum >= galleryLinks.length) {
+        const indexNum = parseInt(index, 10);
+        if (isNaN(indexNum) || indexNum < 1 || indexNum > galleryLinks.length) {
           throw new Error(`Invalid index ${index}. Must be between 1 and ${galleryLinks.length}`);
         }
 
         // Navigate to gallery
-        const galleryLink = galleryLinks[indexNum];
+        const galleryLink = galleryLinks[indexNum - 1];
         console.log(`Navigating to gallery: ${galleryLink}`);
-        await page.goto(galleryLink, { waitUntil: 'domcontentloaded', timeout: 90000 });
-        await delay(5000);
+        const galleryResponse = await page.goto(galleryLink, { waitUntil: 'domcontentloaded', timeout: 60000 });
+        if (!galleryResponse || galleryResponse.status() === 404) {
+          throw new Error(`Gallery page returned ${galleryResponse ? galleryResponse.status() : 'no response'}: ${galleryLink}`);
+        }
+
+        // Wait for images
+        await page.waitForSelector('img, [style*="background-image"]', { timeout: 30000 }).catch(() => console.log('Image selector timeout, proceeding...'));
+
+        // Scroll gallery page
+        await page.evaluate(async () => {
+          await new Promise(resolve => {
+            let totalHeight = 0;
+            const distance = 200;
+            const maxScrolls = 30;
+            let scrollCount = 0;
+            const timer = setInterval(() => {
+              const scrollHeight = document.body.scrollHeight;
+              window.scrollBy(0, distance);
+              totalHeight += distance;
+              scrollCount++;
+              if (totalHeight >= scrollHeight || scrollCount >= maxScrolls) {
+                clearInterval(timer);
+                resolve();
+              }
+            }, 100);
+          });
+        });
 
         // Collect images
         imageData = await page.evaluate(() => {
           const items = [];
-          document.querySelectorAll('a[href], img').forEach(el => {
-            const href = el.href || el.src;
-            if (href && /\.(jpg|jpeg|png|gif|webp|bmp)$/i.test(href)) {
-              items.push({ url: href, thumb: href });
-            }
+          const selectors = [
+            'img[src*=".jpg"], img[src*=".jpeg"], img[src*=".png"], img[src*=".gif"], img[src*=".webp"]',
+            'a[href*=".jpg"], a[href*=".jpeg"], a[href*=".png"], a[href*=".gif"], a[href*=".webp"]'
+          ];
+          selectors.forEach(selector => {
+            document.querySelectorAll(selector).forEach(el => {
+              let src, thumb;
+              if (el.tagName.toLowerCase() === 'img') {
+                src = el.src || el.getAttribute('data-src') || el.getAttribute('data-lazy-src') || el.getAttribute('data-original');
+                thumb = src;
+              } else if (el.tagName.toLowerCase() === 'a') {
+                src = el.href;
+                const img = el.querySelector('img');
+                thumb = img ? (img.src || img.getAttribute('data-src') || img.getAttribute('data-lazy-src') || src) : src;
+              }
+              if (src && /\.(jpg|jpeg|png|gif|webp)$/i.test(src) &&
+                (src.includes('ahottie.net') || src.includes('imgbox.com') || src.includes('wp-content'))) {
+                items.push({ url: src, thumb: thumb || src });
+              }
+            });
           });
-          return items.slice(0, 20); // Limit to 20 images
+          return [...new Set(items.map(item => JSON.stringify(item)))].map(str => JSON.parse(str)).slice(0, 20);
         });
 
+        console.log(`Found ${imageData.length} images in ${galleryLink}`);
         await browser.close();
         browser = null;
-
       } catch (error) {
-        console.error(`Playwright attempt ${attempts} failed: ${error.message}`);
-        if (browser) await browser.close();
+        console.error(`Attempt ${attempts} failed: ${error.message}`);
+        if (browser) {
+          await browser.close();
+          browser = null;
+        }
+        if (attempts === maxAttempts) {
+          throw error;
+        }
       }
     }
 
@@ -131,19 +239,25 @@ app.get('/api/album/:model/:index', async (req, res) => {
       await fs.writeFile(cacheFile, JSON.stringify([]));
       return res.status(404).json({
         error: `No images found for "${model}" at index ${index}.`,
-        suggestion: `Try a different model or index.`
+        suggestion: `Try "Mia Nanasawa" or "cosplay". Visit ${searchUrl} to confirm.`,
+        debug: {
+          search_url: searchUrl,
+          gallery_url: galleryLinks[parseInt(index) - 1] || 'N/A',
+          attempts_made: attempts,
+          links_found: galleryLinks.length
+        }
       });
     }
 
-    // Format and cache
+    // Format and cache images
     const images = imageData.map((data, idx) => ({
       id: idx + 1,
       name: `image_${idx + 1}.${data.url.split('.').pop().split('?')[0] || 'jpg'}`,
       url: data.url,
       thumb: data.thumb
     }));
-    await fs.writeFile(cacheFile, JSON.stringify(images, null, 2));
 
+    await fs.writeFile(cacheFile, JSON.stringify(images, null, 2));
     res.json({
       model,
       index,
@@ -151,27 +265,35 @@ app.get('/api/album/:model/:index', async (req, res) => {
       total: images.length,
       source: 'ahottie.net',
       search_url: searchUrl,
-      gallery_url: galleryLinks[indexNum]
+      gallery_url: galleryLinks[parseInt(index) - 1] || 'N/A',
+      cache_file: cacheFile,
+      cached_at: new Date().toISOString()
     });
   } catch (error) {
     if (browser) await browser.close();
     console.error(`Error for ${req.params.model} at index ${req.params.index}: ${error.message}`);
-    res.status(500).json({ error: `Server error: ${error.message}` });
+    res.status(500).json({
+      error: `Server error: ${error.message}`,
+      debug: {
+        search_url: `https://ahottie.net/search?kw=${encodeURIComponent(req.params.model)}`,
+        timestamp: new Date().toISOString()
+      }
+    });
   }
 });
 
-// API endpoint: GET /api/nsfw/:model/:index
+// Other endpoints (unchanged for brevity)
 app.get('/api/nsfw/:model/:index', async (req, res) => {
   try {
     const { model, index } = req.params;
     const cacheFile = path.join(CACHE_DIR, model, `images_${index}.json`);
     const cachedData = await fs.readFile(cacheFile, 'utf8');
     const images = JSON.parse(cachedData);
-
     if (images.length === 0) {
-      return res.status(404).send(`<html><body><h1>Error</h1><p>No images in cache. Run /api/album/${encodeURIComponent(model)}/${index} first.</p></body></html>`);
+      return res.status(404).send(
+        `<html><body><h1>Error</h1><p>No images in cache. Run <a href="/api/album/${encodeURIComponent(model)}/${index}">/api/album/${encodeURIComponent(model)}/${index}</a> first.</p></body></html>`
+      );
     }
-
     const imageHtml = images.map(img => `
       <div><h3>${img.name}</h3><img src="${img.url}" alt="${img.name}" style="max-width:100%;max-height:600px;"></div>
     `).join('');
@@ -184,13 +306,30 @@ app.get('/api/nsfw/:model/:index', async (req, res) => {
   }
 });
 
-// Health check
 app.get('/', (req, res) => {
   const baseUrl = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
   res.send(`
     <html><head><title>Image Scraper API</title><style>body{margin:40px;font-family:Arial;}</style></head>
-    <body><h1>Image Scraper API Ready</h1><p>Try: <a href="${baseUrl}/api/album/cosplay/1" target="_blank">${baseUrl}/api/album/cosplay/1</a></p></body></html>
+    <body>
+      <h1>Image Scraper API Ready</h1>
+      <p>Try: <a href="${baseUrl}/api/album/cosplay/1">${baseUrl}/api/album/cosplay/1</a></p>
+      <p>Endpoints:</p>
+      <ul>
+        <li><a href="${baseUrl}/api/album/hot/1">${baseUrl}/api/album/hot/1</a></li>
+        <li><a href="${baseUrl}/api/nsfw/hot/1">${baseUrl}/api/nsfw/hot/1</a></li>
+        <li><a href="${baseUrl}/debug">${baseUrl}/debug</a></li>
+      </ul>
+    </body></html>
   `);
+});
+
+app.get('/debug', async (req, res) => {
+  try {
+    const executablePath = await verifyChromium();
+    res.send(`Chromium found at ${executablePath}`);
+  } catch (error) {
+    res.status(500).send(`Chromium not found: ${error.message}`);
+  }
 });
 
 app.listen(PORT, () => {
