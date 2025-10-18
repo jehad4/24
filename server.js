@@ -72,12 +72,12 @@ app.get('/api/album/:model/:index', async (req, res) => {
       console.log(`No valid cache for ${model} at index ${index}, scraping...`);
     }
 
-    let imageUrls = [];
+    let imageData = [];
     let galleryLinks = [];
     let attempts = 0;
     const maxAttempts = 3;
 
-    while (attempts < maxAttempts && imageUrls.length === 0) {
+    while (attempts < maxAttempts && imageData.length === 0) {
       attempts++;
       try {
         console.log(`Scraping attempt ${attempts}/${maxAttempts} for ${model} at index ${index}...`);
@@ -158,10 +158,10 @@ app.get('/api/album/:model/:index', async (req, res) => {
           selectors.forEach(selector => {
             document.querySelectorAll(selector).forEach(a => {
               if (a.href && a.href.includes('ahottie.net') &&
-                  !a.href.includes('/page/') &&
-                  !a.href.includes('/search') &&
-                  !a.href.includes('/?s=') &&
-                  !a.href.includes('#')) {
+                !a.href.includes('/page/') &&
+                !a.href.includes('/search') &&
+                !a.href.includes('/?s=') &&
+                !a.href.includes('#')) {
                 links.push(a.href);
               }
             });
@@ -200,87 +200,121 @@ app.get('/api/album/:model/:index', async (req, res) => {
 
         await delay(12000);
 
-        await page.evaluate(() => {
-          window.scrollTo(0, document.body.scrollHeight);
+        await page.evaluate(async () => {
+          await new Promise((resolve) => {
+            let totalHeight = 0;
+            const distance = 200;
+            const maxScrolls = 100; // Increased max scrolls for better loading
+            let scrollCount = 0;
+            const timer = setInterval(() => {
+              const scrollHeight = document.body.scrollHeight;
+              window.scrollBy(0, distance);
+              totalHeight += distance;
+              scrollCount++;
+              if (totalHeight >= scrollHeight || scrollCount >= maxScrolls) {
+                clearInterval(timer);
+                resolve();
+              }
+            }, 200);
+          });
         });
 
         await delay(10000);
 
-        imageUrls = await page.evaluate(() => {
-          const images = Array.from(document.querySelectorAll('img, [style*="background-image"]'));
-          const urls = [];
-
-          images.forEach(element => {
-            let src;
-            if (element.tagName.toLowerCase() === 'img') {
-              src = element.src ||
-                    element.getAttribute('data-src') ||
-                    element.getAttribute('data-lazy-src') ||
-                    element.getAttribute('data-original') ||
-                    (element.getAttribute('srcset')?.split(',')[0]?.split(' ')[0]);
-            } else {
-              const style = element.getAttribute('style');
-              const match = style?.match(/background-image:\s?url\(['"]?(.+?)['"]?\)/i);
-              src = match ? match[1] : null;
-            }
-
-            if (src && /\.(jpg|jpeg|png|gif|webp|bmp)$/i.test(src)) {
-              const isRelevant = src.includes('ahottie.net') ||
-                               src.includes('imgbox.com') ||
-                               src.includes('wp-content');
-              if (isRelevant) {
-                urls.push(src);
+        imageData = await page.evaluate(() => {
+          const items = [];
+          const anchors = document.querySelectorAll('a[href]');
+          anchors.forEach(a => {
+            const href = a.href;
+            if (/\.(jpg|jpeg|png|gif|webp|bmp)$/i.test(href)) {
+              const img = a.querySelector('img');
+              let thumb = null;
+              if (img) {
+                thumb = img.src ||
+                  img.getAttribute('data-src') ||
+                  img.getAttribute('data-lazy-src') ||
+                  img.getAttribute('data-original') ||
+                  (img.getAttribute('srcset')?.split(',')[0]?.split(' ')[0]);
+              } else {
+                const style = a.getAttribute('style');
+                const match = style?.match(/background-image:\s?url\(['"]?(.+?)['"]?\)/i);
+                thumb = match ? match[1] : null;
+              }
+              const isRelevant = href.includes('ahottie.net') ||
+                href.includes('imgbox.com') ||
+                href.includes('wp-content');
+              if (isRelevant && href) {
+                items.push({
+                  url: href,
+                  thumb: thumb || href // Use full URL as thumb if no separate thumb found
+                });
               }
             }
           });
-
-          return urls.slice(0, 50);
+          return items.slice(0, 50);
         });
 
-        console.log(`Found ${imageUrls.length} images in ${galleryLink}`);
+        console.log(`Found ${imageData.length} images in ${galleryLink}`);
 
         // Fallback to search page if no images
-        if (imageUrls.length === 0) {
+        if (imageData.length === 0) {
           console.log(`No images in gallery, falling back to search page...`);
           await page.goto(searchUrl, { waitUntil: 'networkidle', timeout: 60000 });
           await delay(12000);
-          await page.evaluate(() => {
-            window.scrollTo(0, document.body.scrollHeight);
+          await page.evaluate(async () => {
+            await new Promise((resolve) => {
+              let totalHeight = 0;
+              const distance = 200;
+              const maxScrolls = 100;
+              let scrollCount = 0;
+              const timer = setInterval(() => {
+                const scrollHeight = document.body.scrollHeight;
+                window.scrollBy(0, distance);
+                totalHeight += distance;
+                scrollCount++;
+                if (totalHeight >= scrollHeight || scrollCount >= maxScrolls) {
+                  clearInterval(timer);
+                  resolve();
+                }
+              }, 200);
+            });
           });
           await delay(10000);
 
-          imageUrls = await page.evaluate(() => {
-            const images = Array.from(document.querySelectorAll('img, [style*="background-image"]'));
-            const urls = [];
-
-            images.forEach(element => {
-              let src;
-              if (element.tagName.toLowerCase() === 'img') {
-                src = element.src ||
-                      element.getAttribute('data-src') ||
-                      element.getAttribute('data-lazy-src') ||
-                      element.getAttribute('data-original') ||
-                      (element.getAttribute('srcset')?.split(',')[0]?.split(' ')[0]);
-              } else {
-                const style = element.getAttribute('style');
-                const match = style?.match(/background-image:\s?url\(['"]?(.+?)['"]?\)/i);
-                src = match ? match[1] : null;
-              }
-
-              if (src && /\.(jpg|jpeg|png|gif|webp|bmp)$/i.test(src)) {
-                const isRelevant = src.includes('ahottie.net') ||
-                                 src.includes('imgbox.com') ||
-                                 src.includes('wp-content');
-                if (isRelevant) {
-                  urls.push(src);
+          imageData = await page.evaluate(() => {
+            const items = [];
+            const anchors = document.querySelectorAll('a[href]');
+            anchors.forEach(a => {
+              const href = a.href;
+              if (/\.(jpg|jpeg|png|gif|webp|bmp)$/i.test(href)) {
+                const img = a.querySelector('img');
+                let thumb = null;
+                if (img) {
+                  thumb = img.src ||
+                    img.getAttribute('data-src') ||
+                    img.getAttribute('data-lazy-src') ||
+                    img.getAttribute('data-original') ||
+                    (img.getAttribute('srcset')?.split(',')[0]?.split(' ')[0]);
+                } else {
+                  const style = a.getAttribute('style');
+                  const match = style?.match(/background-image:\s?url\(['"]?(.+?)['"]?\)/i);
+                  thumb = match ? match[1] : null;
+                }
+                const isRelevant = href.includes('ahottie.net') ||
+                  href.includes('imgbox.com') ||
+                  href.includes('wp-content');
+                if (isRelevant && href) {
+                  items.push({
+                    url: href,
+                    thumb: thumb || href
+                  });
                 }
               }
             });
-
-            return urls.slice(0, 50);
+            return items.slice(0, 50);
           });
 
-          console.log(`Found ${imageUrls.length} images from fallback search page`);
+          console.log(`Found ${imageData.length} images from fallback search page`);
         }
 
         await browser.close();
@@ -295,7 +329,7 @@ app.get('/api/album/:model/:index', async (req, res) => {
       }
     }
 
-    if (imageUrls.length === 0) {
+    if (imageData.length === 0) {
       await fs.writeFile(cacheFile, JSON.stringify([]));
       return res.status(404).json({
         error: `No images found for "${model}" at index ${index}.`,
@@ -310,13 +344,13 @@ app.get('/api/album/:model/:index', async (req, res) => {
       });
     }
 
-    const images = imageUrls.map((url, idx) => {
-      const fileExt = url.split('.').pop().split('?')[0] || 'jpg';
+    const images = imageData.map((data, idx) => {
+      const fileExt = data.url.split('.').pop().split('?')[0] || 'jpg';
       return {
         id: idx + 1,
         name: `image_${idx + 1}.${fileExt}`,
-        url,
-        thumb: url
+        url: data.url,
+        thumb: data.thumb
       };
     });
 
@@ -362,12 +396,12 @@ app.get('/api/nsfw/:model/:index', async (req, res) => {
         console.log(`Empty cache for ${model} at index ${index}`);
         return res.status(404).send(`
           <html>
-            <head><title>Error</title></head>
-            <body>
-              <h1>Error</h1>
-              <p>No images found in cache for ${model} at index ${index}.</p>
-              <p>Run <a href="/api/album/${encodeURIComponent(model)}/${index}">/api/album/${encodeURIComponent(model)}/${index}</a> first.</p>
-            </body>
+          <head><title>Error</title></head>
+          <body>
+          <h1>Error</h1>
+          <p>No images found in cache for ${model} at index ${index}.</p>
+          <p>Run <a href="/api/album/${encodeURIComponent(model)}/${index}">/api/album/${encodeURIComponent(model)}/${index}</a> first.</p>
+          </body>
           </html>
         `);
       }
@@ -375,53 +409,53 @@ app.get('/api/nsfw/:model/:index', async (req, res) => {
       console.log(`No cache file found for ${model} at index ${index}`);
       return res.status(404).send(`
         <html>
-          <head><title>Error</title></head>
-          <body>
-            <h1>Error</h1>
-            <p>No cached images for ${model} at index ${index}.</p>
-            <p>Run <a href="/api/album/${encodeURIComponent(model)}/${index}">/api/album/${encodeURIComponent(model)}/${index}</a> first.</p>
-          </body>
+        <head><title>Error</title></head>
+        <body>
+        <h1>Error</h1>
+        <p>No cached images for ${model} at index ${index}.</p>
+        <p>Run <a href="/api/album/${encodeURIComponent(model)}/${index}">/api/album/${encodeURIComponent(model)}/${index}</a> first.</p>
+        </body>
         </html>
       `);
     }
 
     const imageHtml = images.map(img => `
       <div style="margin-bottom: 20px;">
-        <h3>${img.name}</h3>
-        <img src="${img.url}" alt="${img.name}" style="max-width: 100%; height: auto; max-height: 600px;">
+      <h3>${img.name}</h3>
+      <img src="${img.url}" alt="${img.name}" style="max-width: 100%; height: auto; max-height: 600px;">
       </div>
     `).join('');
 
     res.send(`
       <html>
-        <head>
-          <title>Images for ${model} (Index ${index})</title>
-          <style>
-            body { font-family: Arial, sans-serif; margin: 40px; }
-            h1 { color: #333; }
-            h3 { margin: 10px 0 5px; }
-            img { display: block; }
-            a { color: #0066cc; text-decoration: none; }
-            a:hover { text-decoration: underline; }
-          </style>
-        </head>
-        <body>
-          <h1>Images for ${model} (Index ${index})</h1>
-          <p>Total images: ${images.length}</p>
-          <p><a href="/api/album/${encodeURIComponent(model)}/${index}">Refresh cache</a></p>
-          ${imageHtml}
-        </body>
+      <head>
+      <title>Images for ${model} (Index ${index})</title>
+      <style>
+      body { font-family: Arial, sans-serif; margin: 40px; }
+      h1 { color: #333; }
+      h3 { margin: 10px 0 5px; }
+      img { display: block; }
+      a { color: #0066cc; text-decoration: none; }
+      a:hover { text-decoration: underline; }
+      </style>
+      </head>
+      <body>
+      <h1>Images for ${model} (Index ${index})</h1>
+      <p>Total images: ${images.length}</p>
+      <p><a href="/api/album/${encodeURIComponent(model)}/${index}">Refresh cache</a></p>
+      ${imageHtml}
+      </body>
       </html>
     `);
   } catch (error) {
     console.error(`NSFW endpoint error for ${req.params.model} at index ${req.params.index}: ${error.message}`);
     res.status(500).send(`
       <html>
-        <head><title>Error</title></head>
-        <body>
-          <h1>Error</h1>
-          <p>Server error: ${error.message}</p>
-        </body>
+      <head><title>Error</title></head>
+      <body>
+      <h1>Error</h1>
+      <p>Server error: ${error.message}</p>
+      </body>
       </html>
     `);
   }
@@ -443,34 +477,34 @@ app.get('/', (req, res) => {
   const baseUrl = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
   res.send(`
     <html>
-      <head>
-        <title>Image Scraper API</title>
-        <style>
-          body { font-family: Arial, sans-serif; margin: 40px; }
-          code { background: #f4f4f4; padding: 2px 6px; border-radius: 3px; }
-          li { margin: 10px 0; }
-        </style>
-      </head>
-      <body>
-        <h1>Image Scraper API Ready</h1>
-        <p>Using search URL: <code>https://ahottie.net/search?kw=modelname</code></p>
-        
-        <p>Endpoints:</p>
-        <ul>
-          <li><code>/api/album/cosplay/5</code> - Scrape images from 5th gallery and save to cache</li>
-          <li><code>/api/nsfw/cosplay/5</code> - Display images from cache/cosplay/images_5.json</li>
-          <li><code>/debug</code> - Check Chromium availability</li>
-        </ul>
-        
-        <p>Example Searches:</p>
-        <ul>
-          <li><a href="/api/album/cosplay/5" target="_blank">${baseUrl}/api/album/cosplay/5</a></li>
-          <li><a href="/api/nsfw/cosplay/5" target="_blank">${baseUrl}/api/nsfw/cosplay/5</a></li>
-          <li><a href="/api/album/horny/9" target="_blank">${baseUrl}/api/album/horny/9</a></li>
-          <li><a href="/api/nsfw/horny/9" target="_blank">${baseUrl}/api/nsfw/horny/9</a></li>
-          <li><a href="/debug" target="_blank">${baseUrl}/debug</a></li>
-        </ul>
-      </body>
+    <head>
+    <title>Image Scraper API</title>
+    <style>
+    body { font-family: Arial, sans-serif; margin: 40px; }
+    code { background: #f4f4f4; padding: 2px 6px; border-radius: 3px; }
+    li { margin: 10px 0; }
+    </style>
+    </head>
+    <body>
+    <h1>Image Scraper API Ready</h1>
+    <p>Using search URL: <code>https://ahottie.net/search?kw=modelname</code></p>
+    
+    <p>Endpoints:</p>
+    <ul>
+    <li><code>/api/album/cosplay/5</code> - Scrape images from 5th gallery and save to cache</li>
+    <li><code>/api/nsfw/cosplay/5</code> - Display images from cache/cosplay/images_5.json</li>
+    <li><code>/debug</code> - Check Chromium availability</li>
+    </ul>
+    
+    <p>Example Searches:</p>
+    <ul>
+    <li><a href="/api/album/cosplay/5" target="_blank">${baseUrl}/api/album/cosplay/5</a></li>
+    <li><a href="/api/nsfw/cosplay/5" target="_blank">${baseUrl}/api/nsfw/cosplay/5</a></li>
+    <li><a href="/api/album/horny/9" target="_blank">${baseUrl}/api/album/horny/9</a></li>
+    <li><a href="/api/nsfw/horny/9" target="_blank">${baseUrl}/api/nsfw/horny/9</a></li>
+    <li><a href="/debug" target="_blank">${baseUrl}/debug</a></li>
+    </ul>
+    </body>
     </html>
   `);
 });
